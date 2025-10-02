@@ -32,3 +32,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #undef ROTATIONAL_TRANSFORM_ANGLE
 #define ROTATIONAL_TRANSFORM_ANGLE -30
+
+// Tap-hold timing configuration for improved Space/Enter behavior
+#define TAPPING_TERM 200                    // Global default (ms)
+#define PERMISSIVE_HOLD                     // Better for fast typing
+#define HOLD_ON_OTHER_KEY_PRESS_PER_KEY     // Per-key hold behavior
+#define QUICK_TAP_TERM 120                  // Prevent accidental holds on rapid taps
+#define TAPPING_TERM_PER_KEY                // Enable per-key timing customization

@@ -1,4 +1,6 @@
- #include QMK_KEYBOARD_H
+#include QMK_KEYBOARD_H
+#include "pointing_device_scroll.h"
+#include "raw_hid.h"
 
 #define _LAYER0 0
 #define _LAYER1 1
@@ -21,6 +23,32 @@ enum custom_keycodes {
     ACCEL_DN
 };
 
+// Raw HID Protocol
+#define HID_CMD_GET_CONFIG      0x01
+#define HID_CMD_SET_POINTER_X   0x02
+#define HID_CMD_SET_POINTER_Y   0x03
+#define HID_CMD_SET_CARET_X     0x04
+#define HID_CMD_SET_CARET_Y     0x05
+#define HID_CMD_SET_TIMEOUT     0x06
+#define HID_CMD_SET_BASE_SENS   0x07
+#define HID_CMD_SAVE_EEPROM     0x08
+#define HID_CMD_RESET_DEFAULTS  0x09
+
+// EEPROM config structure (fits in 16 bytes)
+typedef struct {
+    uint8_t  magic;           // 0xAC = valid config
+    int16_t  pointer_accel_x; // Quadratic coefficient for pointer X (8.8 fixed-point)
+    int16_t  pointer_accel_y; // Quadratic coefficient for pointer Y
+    int16_t  caret_accel_x;   // Quadratic coefficient for caret X
+    int16_t  caret_accel_y;   // Quadratic coefficient for caret Y
+    uint16_t mouse_timeout;   // Timeout in ms
+    int16_t  base_sensitivity;// Base sensitivity (8.8 fixed-point)
+    uint8_t  reserved[3];     // Reserved for future use
+} eeprom_config_t;
+
+#define EEPROM_MAGIC 0xAC
+#define EEPROM_CONFIG_ADDR ((eeprom_config_t*)0)  // Store at EEPROM address 0
+
 //Scroll, Caret,  Volume, Mouse Acceleration
 
 //pointing_device_set_rotational_transform_angle(30);
@@ -32,13 +60,22 @@ static bool caret_mode = false;
 static bool volume_mode = false;
 static bool default_mode = true;
 
-// Runtime adjustable base sensitivity (linear multiplier)
-static float base_sens = 0.1;
+// Fixed-point math (8.8 format: 8 bits integer, 8 bits fractional)
+#define FP_SCALE 256
+#define FLOAT_TO_FP(x) ((int16_t)((x) * FP_SCALE))
+#define FP_MUL(a, b) (((int32_t)(a) * (b)) >> 8)
 
-// Mouse button timeout feature
+// Runtime adjustable acceleration coefficients (8.8 fixed-point, can be updated via HID)
+static int16_t pointer_accel_x_quad = FLOAT_TO_FP(5.0);    // Default: 5.0
+static int16_t pointer_accel_y_quad = FLOAT_TO_FP(4.8);    // Default: 4.8
+static int16_t caret_accel_x_quad = FLOAT_TO_FP(0.25);     // Default: 0.25
+static int16_t caret_accel_y_quad = FLOAT_TO_FP(0.25);     // Default: 0.25
+static int16_t base_sens_fp = FLOAT_TO_FP(0.1);            // Default: 0.1
+
+// Mouse button timeout feature (can be updated via HID)
 static uint32_t last_trackball_activity = 0;
 static bool mouse_button_mode = false;
-#define MOUSE_TIMEOUT 750  // 750ms timeout
+static uint16_t mouse_timeout_ms = 750;  // Default: 750ms
 
 
 layer_state_t layer_state_set_user(layer_state_t state) {
@@ -92,11 +129,13 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
         } else if (abs_y > abs_x * 1.3) {
             mouse_report.x = 0;
         }
-        // X with reduced acceleration, Y with higher sensitivity
+        // X with reduced acceleration, Y with higher sensitivity (uses runtime adjustable coefficients)
         int16_t abs_x_mult = abs(mouse_report.x);
         int16_t abs_y_mult = abs(mouse_report.y);
-        x = (mouse_xy_report_t)(mouse_report.x > 0 ? (abs_x_mult * abs_x_mult * 0.25 + abs_x_mult * 1.3) : -(abs_x_mult * abs_x_mult * 0.25 + abs_x_mult * 1.3));
-        y = (mouse_xy_report_t)(mouse_report.y > 0 ? (abs_y_mult * abs_y_mult * 0.25 + abs_y_mult * 1.0) : -(abs_y_mult * abs_y_mult * 0.25 + abs_y_mult * 1.0));
+        int16_t accel_x = FP_MUL(abs_x_mult * abs_x_mult, caret_accel_x_quad) + FP_MUL(abs_x_mult, FLOAT_TO_FP(1.3));
+        int16_t accel_y = FP_MUL(abs_y_mult * abs_y_mult, caret_accel_y_quad) + FP_MUL(abs_y_mult, FLOAT_TO_FP(1.0));
+        x = (mouse_xy_report_t)(mouse_report.x > 0 ? accel_x : -accel_x);
+        y = (mouse_xy_report_t)(mouse_report.y > 0 ? accel_y : -accel_y);
     }
 
     else if (volume_mode) {
@@ -113,11 +152,13 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
                 mouse_report.x = 0;
             }
         }
-        // Tuned quadratic acceleration (same for scroll and pointer modes)
+        // Tuned quadratic acceleration (same for scroll and pointer modes, uses runtime adjustable coefficients)
         int16_t abs_x = abs(mouse_report.x);
         int16_t abs_y = abs(mouse_report.y);
-        x = (mouse_xy_report_t)(mouse_report.x > 0 ? (abs_x * abs_x * 5.0 + abs_x * base_sens * 0.6) : -(abs_x * abs_x * 5.0 + abs_x * base_sens * 0.6));
-        y = (mouse_xy_report_t)(mouse_report.y > 0 ? (abs_y * abs_y * 4.8 + abs_y * base_sens * 0.6) : -(abs_y * abs_y * 4.8 + abs_y * base_sens * 0.6));
+        int16_t accel_x = FP_MUL(abs_x * abs_x, pointer_accel_x_quad) + FP_MUL(abs_x, FP_MUL(base_sens_fp, FLOAT_TO_FP(0.6)));
+        int16_t accel_y = FP_MUL(abs_y * abs_y, pointer_accel_y_quad) + FP_MUL(abs_y, FP_MUL(base_sens_fp, FLOAT_TO_FP(0.6)));
+        x = (mouse_xy_report_t)(mouse_report.x > 0 ? accel_x : -accel_x);
+        y = (mouse_xy_report_t)(mouse_report.y > 0 ? accel_y : -accel_y);
     }
 
     mouse_report.x = x;
@@ -129,8 +170,8 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
         mouse_button_mode = true;
     }
 
-    // Check timeout and deactivate mouse mode if idle > 750ms
-    if (mouse_button_mode && timer_elapsed32(last_trackball_activity) > MOUSE_TIMEOUT) {
+    // Check timeout and deactivate mouse mode if idle (uses runtime adjustable timeout)
+    if (mouse_button_mode && timer_elapsed32(last_trackball_activity) > mouse_timeout_ms) {
         mouse_button_mode = false;
     }
 
@@ -138,59 +179,69 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
 
 }
 
+// Per-key tapping term configuration for improved tap-hold behavior
+uint16_t get_tapping_term(uint16_t keycode, keyrecord_t *record) {
+    switch (keycode) {
+        case LT(LAYER2, KC_SPC):     // Left thumb (Space)
+        case LT(LAYER3, KC_ENT):     // Right thumb (Enter)
+            return 230;              // Longer for thumbs (less precise than fingers)
+        case MT(MOD_RGUI, KC_BTN5):  // Thumb mouse button with Cmd modifier
+            return 200;              // Standard timing for mouse button
+        default:
+            return TAPPING_TERM;     // Use global default (200ms)
+    }
+}
+
+// Per-key hold-on-other-key-press behavior
+bool get_hold_on_other_key_press(uint16_t keycode, keyrecord_t *record) {
+    switch (keycode) {
+        case LT(LAYER2, KC_SPC):     // Space - don't activate layer if another key pressed
+        case LT(LAYER3, KC_ENT):     // Enter - don't activate layer if another key pressed
+            return false;            // Requires key to be held without other keys
+        default:
+            return true;             // Default behavior for other keys
+    }
+}
+
 bool process_record_user(uint16_t keycode, keyrecord_t *record) {
     // Mouse button timeout: intercept J/L/H when in mouse mode
     if (mouse_button_mode) {
+        uint16_t btn_code = 0;
         switch (keycode) {
-            case KC_J:  // Left click
-                if (record->event.pressed) {
-                    register_code(KC_BTN1);
-                    last_trackball_activity = timer_read32();  // Reset timeout on click
-                } else {
-                    unregister_code(KC_BTN1);
-                }
-                return false;
-            case KC_L:  // Right click
-                if (record->event.pressed) {
-                    register_code(KC_BTN2);
-                    last_trackball_activity = timer_read32();  // Reset timeout on click
-                } else {
-                    unregister_code(KC_BTN2);
-                }
-                return false;
-            case KC_H:  // Middle click
-                if (record->event.pressed) {
-                    register_code(KC_BTN3);
-                    last_trackball_activity = timer_read32();  // Reset timeout on click
-                } else {
-                    unregister_code(KC_BTN3);
-                }
-                return false;
-            default:
-                // Deactivate mouse mode on any other key press (except thumb buttons)
-                if (keycode != KC_LGUI && keycode != LT(LAYER2, KC_SPC) &&
-                    keycode != LT(LAYER3, KC_ENT) && keycode != KC_LCTL &&
-                    keycode != KC_LALT && keycode != MT(MOD_RGUI, KC_BTN5) &&
-                    keycode != MT(MOD_RSFT, KC_BTN4) && keycode != KC_BSPC &&
-                    keycode != LT(LAYER4, KC_HOME) && keycode != LT(LAYER3, KC_END) &&
-                    keycode != LT(LAYER4, KC_K)) {
-                    mouse_button_mode = false;
-                }
-                break;
+            case KC_J: btn_code = KC_BTN1; break;  // Left click
+            case KC_L: btn_code = KC_BTN2; break;  // Right click
+            case KC_H: btn_code = KC_BTN3; break;  // Middle click
+        }
+
+        if (btn_code) {
+            if (record->event.pressed) {
+                register_code(btn_code);
+                last_trackball_activity = timer_read32();
+            } else {
+                unregister_code(btn_code);
+            }
+            return false;
+        } else if (keycode != KC_LGUI && keycode != LT(LAYER2, KC_SPC) &&
+                   keycode != LT(LAYER3, KC_ENT) && keycode != KC_LCTL &&
+                   keycode != KC_LALT && keycode != MT(MOD_RGUI, KC_BTN5) &&
+                   keycode != MT(MOD_RSFT, KC_BTN4) && keycode != KC_BSPC &&
+                   keycode != LT(LAYER4, KC_HOME) && keycode != LT(LAYER3, KC_END) &&
+                   keycode != LT(LAYER4, KC_K)) {
+            mouse_button_mode = false;
         }
     }
 
     switch (keycode) {
         case ACCEL_UP:
             if (record->event.pressed) {
-                base_sens += 0.1;
-                if (base_sens > 3.0) base_sens = 3.0;
+                base_sens_fp += FLOAT_TO_FP(0.1);  // +26 in fixed-point
+                if (base_sens_fp > FLOAT_TO_FP(3.0)) base_sens_fp = FLOAT_TO_FP(3.0);  // Max 768
             }
             return false;
         case ACCEL_DN:
             if (record->event.pressed) {
-                base_sens -= 0.1;
-                if (base_sens < 0.1) base_sens = 0.1;
+                base_sens_fp -= FLOAT_TO_FP(0.1);  // -26 in fixed-point
+                if (base_sens_fp < FLOAT_TO_FP(0.1)) base_sens_fp = FLOAT_TO_FP(0.1);  // Min 26
             }
             return false;
     }
@@ -259,28 +310,128 @@ KC_TRNS,     KC_TRNS,     						                                                
 
     [_LAYER5] = LAYOUT(
 
-KC_TRNS, 		KC_TRNS,	KC_TRNS, 				KC_TRNS, 	KC_TRNS, 	KC_TRNS, 	/*KC_NO*/                                   KC_TRNS, 		KC_TRNS,	KC_TRNS, 				KC_TRNS, 	KC_TRNS, 	KC_TRNS, 	//KC_TRNS,
-KC_TRNS, 		KC_TRNS,	KC_TRNS, 				KC_TRNS, 	KC_TRNS, 	KC_TRNS, 	/*KC_NO*/                                   KC_TRNS, 		KC_TRNS, 	KC_TRNS, 				KC_TRNS, 	KC_TRNS, 	KC_TRNS,	//KC_TRNS,                           
-KC_TRNS, 		KC_TRNS,	KC_TRNS, 				KC_TRNS, 	KC_TRNS, 	KC_TRNS, 	/*KC_NO*/                               	KC_TRNS, 		KC_TRNS, 	KC_TRNS, 				KC_TRNS, 	KC_TRNS, 	KC_TRNS, 	//KC_TRNS,
-							KC_TRNS, 				KC_TRNS, 						                                                                            KC_TRNS, 				KC_TRNS, 
-KC_TRNS, 		KC_TRNS,					                                                                          	        	KC_NO, 	       		KC_TRNS,
-KC_TRNS, 		KC_TRNS,						                                                                          	      	KC_TRNS, 			KC_TRNS, 
-KC_TRNS, 		KC_TRNS,     						                                                                              	KC_TRNS, 	   		KC_NO			
+KC_NO, 		KC_NO,	KC_NO, 				KC_NO, 	KC_NO, 	KC_NO, 	                                   KC_NO, 		KC_NO,	KC_NO, 				KC_NO, 	KC_NO, 	KC_NO,
+KC_NO, 		KC_NO,	KC_NO, 				KC_NO, 	KC_NO, 	KC_NO, 	                                   KC_NO, 		KC_NO, 	KC_NO, 				KC_NO, 	KC_NO, 	KC_NO,
+KC_NO, 		KC_NO,	KC_NO, 				KC_NO, 	KC_NO, 	KC_NO, 	                               	KC_NO, 		KC_TRNS, 	KC_NO, 				KC_NO, 	KC_NO, 	KC_NO,
+							KC_NO, 				KC_NO, 						                                                                            KC_NO, 				KC_NO,
+KC_NO, 		KC_NO,					                                                                          	        	KC_NO, 	       		KC_NO,
+KC_NO, 		KC_NO,						                                                                          	      	KC_NO, 			KC_NO,
+KC_NO, 		KC_NO,     						                                                                              	KC_NO, 	   		KC_NO
 
 ),
 
     [_LAYER6] = LAYOUT(
 
-KC_TRNS, 		KC_TRNS,	KC_TRNS, 				KC_TRNS, 	KC_TRNS, 	KC_TRNS, 	/*KC_NO*/                                   KC_TRNS, 		KC_TRNS,	KC_TRNS, 				KC_TRNS, 	KC_TRNS, 	KC_TRNS, 	//KC_TRNS,
-KC_TRNS, 		KC_TRNS,	KC_TRNS, 				KC_TRNS, 	KC_TRNS, 	KC_TRNS, 	/*KC_NO*/                                   KC_TRNS, 		KC_TRNS, 	KC_TRNS, 				KC_TRNS, 	KC_TRNS, 	KC_TRNS,	//KC_TRNS,                           
-KC_TRNS, 		KC_TRNS,	KC_TRNS, 				KC_TRNS, 	KC_TRNS, 	KC_TRNS, 	/*KC_NO*/                               	KC_TRNS, 		KC_TRNS, 	KC_TRNS, 				KC_TRNS, 	KC_TRNS, 	KC_TRNS, 	//KC_TRNS,
-							KC_TRNS, 				KC_TRNS, 						                                                                            KC_TRNS, 				KC_TRNS, 
-KC_TRNS, 		KC_TRNS,					                                                                          	        	KC_NO, 	       		KC_TRNS,
-KC_TRNS, 		KC_TRNS,						                                                                          	      	KC_TRNS, 			KC_TRNS, 
-KC_TRNS, 		KC_TRNS,     						                                                                              	KC_TRNS, 	   		KC_NO			
+KC_NO, 		KC_NO,	KC_NO, 				KC_NO, 	KC_NO, 	KC_NO, 	                                   KC_NO, 		KC_NO,	KC_NO, 				KC_NO, 	KC_NO, 	KC_NO,
+KC_NO, 		KC_NO,	KC_NO, 				KC_NO, 	KC_NO, 	KC_NO, 	                                   KC_NO, 		KC_NO, 	KC_NO, 				KC_NO, 	KC_NO, 	KC_NO,
+KC_NO, 		KC_NO,	KC_NO, 				KC_NO, 	KC_NO, 	KC_NO, 	                               	KC_NO, 		KC_NO, 	KC_TRNS, 				KC_NO, 	KC_NO, 	KC_NO,
+							KC_NO, 				KC_NO, 						                                                                            KC_NO, 				KC_NO,
+KC_NO, 		KC_NO,					                                                                          	        	KC_NO, 	       		KC_NO,
+KC_NO, 		KC_NO,						                                                                          	      	KC_NO, 			KC_NO,
+KC_NO, 		KC_NO,     						                                                                              	KC_NO, 	   		KC_NO
 
 )
 
 };
 
- 
+// Load config from EEPROM on startup
+void keyboard_post_init_user(void) {
+    eeprom_config_t config;
+    eeprom_read_block(&config, EEPROM_CONFIG_ADDR, sizeof(eeprom_config_t));
+
+    if (config.magic == EEPROM_MAGIC) {
+        // Valid config found, load it
+        pointer_accel_x_quad = config.pointer_accel_x;
+        pointer_accel_y_quad = config.pointer_accel_y;
+        caret_accel_x_quad = config.caret_accel_x;
+        caret_accel_y_quad = config.caret_accel_y;
+        mouse_timeout_ms = config.mouse_timeout;
+        base_sens_fp = config.base_sensitivity;
+    }
+    // If no valid config, use defaults (already initialized)
+}
+
+// Save current config to EEPROM
+void save_config_to_eeprom(void) {
+    eeprom_config_t config = {
+        .magic = EEPROM_MAGIC,
+        .pointer_accel_x = pointer_accel_x_quad,
+        .pointer_accel_y = pointer_accel_y_quad,
+        .caret_accel_x = caret_accel_x_quad,
+        .caret_accel_y = caret_accel_y_quad,
+        .mouse_timeout = mouse_timeout_ms,
+        .base_sensitivity = base_sens_fp,
+        .reserved = {0, 0, 0}
+    };
+    eeprom_update_block(&config, EEPROM_CONFIG_ADDR, sizeof(eeprom_config_t));
+}
+
+// Reset to factory defaults
+void reset_to_defaults(void) {
+    pointer_accel_x_quad = FLOAT_TO_FP(5.0);
+    pointer_accel_y_quad = FLOAT_TO_FP(4.8);
+    caret_accel_x_quad = FLOAT_TO_FP(0.25);
+    caret_accel_y_quad = FLOAT_TO_FP(0.25);
+    base_sens_fp = FLOAT_TO_FP(0.1);
+    mouse_timeout_ms = 750;
+}
+
+// Raw HID receive handler
+void raw_hid_receive(uint8_t *data, uint8_t length) {
+    uint8_t cmd = data[0];
+
+    switch (cmd) {
+        case HID_CMD_GET_CONFIG: {
+            // Send current config back to host
+            uint8_t response[32] = {0};
+            response[0] = HID_CMD_GET_CONFIG;
+            response[1] = (pointer_accel_x_quad >> 8) & 0xFF;
+            response[2] = pointer_accel_x_quad & 0xFF;
+            response[3] = (pointer_accel_y_quad >> 8) & 0xFF;
+            response[4] = pointer_accel_y_quad & 0xFF;
+            response[5] = (caret_accel_x_quad >> 8) & 0xFF;
+            response[6] = caret_accel_x_quad & 0xFF;
+            response[7] = (caret_accel_y_quad >> 8) & 0xFF;
+            response[8] = caret_accel_y_quad & 0xFF;
+            response[9] = (mouse_timeout_ms >> 8) & 0xFF;
+            response[10] = mouse_timeout_ms & 0xFF;
+            response[11] = (base_sens_fp >> 8) & 0xFF;
+            response[12] = base_sens_fp & 0xFF;
+            raw_hid_send(response, length);
+            break;
+        }
+
+        case HID_CMD_SET_POINTER_X:
+            pointer_accel_x_quad = (data[1] << 8) | data[2];
+            break;
+
+        case HID_CMD_SET_POINTER_Y:
+            pointer_accel_y_quad = (data[1] << 8) | data[2];
+            break;
+
+        case HID_CMD_SET_CARET_X:
+            caret_accel_x_quad = (data[1] << 8) | data[2];
+            break;
+
+        case HID_CMD_SET_CARET_Y:
+            caret_accel_y_quad = (data[1] << 8) | data[2];
+            break;
+
+        case HID_CMD_SET_TIMEOUT:
+            mouse_timeout_ms = (data[1] << 8) | data[2];
+            break;
+
+        case HID_CMD_SET_BASE_SENS:
+            base_sens_fp = (data[1] << 8) | data[2];
+            break;
+
+        case HID_CMD_SAVE_EEPROM:
+            save_config_to_eeprom();
+            break;
+
+        case HID_CMD_RESET_DEFAULTS:
+            reset_to_defaults();
+            break;
+    }
+}
+
