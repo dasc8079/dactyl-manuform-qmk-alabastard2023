@@ -33,17 +33,23 @@ enum custom_keycodes {
 #define HID_CMD_SET_BASE_SENS   0x07
 #define HID_CMD_SAVE_EEPROM     0x08
 #define HID_CMD_RESET_DEFAULTS  0x09
+#define HID_CMD_SET_SCROLL_X    0x0A
+#define HID_CMD_SET_SCROLL_Y    0x0B
+#define HID_CMD_SET_AXIS_SNAP   0x0C
 
-// EEPROM config structure (fits in 16 bytes)
+// EEPROM config structure (22 bytes)
 typedef struct {
     uint8_t  magic;           // 0xAC = valid config
     int16_t  pointer_accel_x; // Quadratic coefficient for pointer X (8.8 fixed-point)
     int16_t  pointer_accel_y; // Quadratic coefficient for pointer Y
+    int16_t  scroll_accel_x;  // Quadratic coefficient for scroll X
+    int16_t  scroll_accel_y;  // Quadratic coefficient for scroll Y
     int16_t  caret_accel_x;   // Quadratic coefficient for caret X
     int16_t  caret_accel_y;   // Quadratic coefficient for caret Y
     uint16_t mouse_timeout;   // Timeout in ms
     int16_t  base_sensitivity;// Base sensitivity (8.8 fixed-point)
-    uint8_t  reserved[3];     // Reserved for future use
+    int16_t  axis_snap_thresh;// Axis snapping threshold (8.8 fixed-point)
+    uint8_t  reserved[1];     // Reserved for future use
 } eeprom_config_t;
 
 #define EEPROM_MAGIC 0xAC
@@ -68,9 +74,12 @@ static bool default_mode = true;
 // Runtime adjustable acceleration coefficients (8.8 fixed-point, can be updated via HID)
 static int16_t pointer_accel_x_quad = FLOAT_TO_FP(5.0);    // Default: 5.0
 static int16_t pointer_accel_y_quad = FLOAT_TO_FP(4.8);    // Default: 4.8
+static int16_t scroll_accel_x_quad = FLOAT_TO_FP(5.0);     // Default: 5.0 (separate from pointer)
+static int16_t scroll_accel_y_quad = FLOAT_TO_FP(4.8);     // Default: 4.8 (separate from pointer)
 static int16_t caret_accel_x_quad = FLOAT_TO_FP(0.25);     // Default: 0.25
 static int16_t caret_accel_y_quad = FLOAT_TO_FP(0.25);     // Default: 0.25
 static int16_t base_sens_fp = FLOAT_TO_FP(0.1);            // Default: 0.1
+static int16_t axis_snap_threshold = FLOAT_TO_FP(1.3);     // Default: 1.3 (axis snapping sensitivity)
 
 // Mouse button timeout feature (can be updated via HID)
 static uint32_t last_trackball_activity = 0;
@@ -121,12 +130,13 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
     int16_t raw_y = mouse_report.y;
 
     if (caret_mode) {
-        // Symmetric axis snapping - equal threshold for both directions
+        // Symmetric axis snapping - uses runtime adjustable threshold
         int16_t abs_x = abs(mouse_report.x);
         int16_t abs_y = abs(mouse_report.y);
-        if (abs_x > abs_y * 1.3) {
+        // axis_snap_threshold is in 8.8 format, so multiply abs_y by threshold and divide by FP_SCALE
+        if (FP_MUL(abs_y, axis_snap_threshold) < abs_x) {
             mouse_report.y = 0;
-        } else if (abs_y > abs_x * 1.3) {
+        } else if (FP_MUL(abs_x, axis_snap_threshold) < abs_y) {
             mouse_report.x = 0;
         }
         // X with reduced acceleration, Y with higher sensitivity (uses runtime adjustable coefficients)
@@ -152,11 +162,16 @@ report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
                 mouse_report.x = 0;
             }
         }
-        // Tuned quadratic acceleration (same for scroll and pointer modes, uses runtime adjustable coefficients)
+        // Quadratic acceleration with mode-specific curves
         int16_t abs_x = abs(mouse_report.x);
         int16_t abs_y = abs(mouse_report.y);
-        int16_t accel_x = FP_MUL(abs_x * abs_x, pointer_accel_x_quad) + FP_MUL(abs_x, FP_MUL(base_sens_fp, FLOAT_TO_FP(0.6)));
-        int16_t accel_y = FP_MUL(abs_y * abs_y, pointer_accel_y_quad) + FP_MUL(abs_y, FP_MUL(base_sens_fp, FLOAT_TO_FP(0.6)));
+
+        // Use scroll-specific curves in scroll mode, pointer curves in default mode
+        int16_t x_quad_coeff = scroll_mode ? scroll_accel_x_quad : pointer_accel_x_quad;
+        int16_t y_quad_coeff = scroll_mode ? scroll_accel_y_quad : pointer_accel_y_quad;
+
+        int16_t accel_x = FP_MUL(abs_x * abs_x, x_quad_coeff) + FP_MUL(abs_x, FP_MUL(base_sens_fp, FLOAT_TO_FP(0.6)));
+        int16_t accel_y = FP_MUL(abs_y * abs_y, y_quad_coeff) + FP_MUL(abs_y, FP_MUL(base_sens_fp, FLOAT_TO_FP(0.6)));
         x = (mouse_xy_report_t)(mouse_report.x > 0 ? accel_x : -accel_x);
         y = (mouse_xy_report_t)(mouse_report.y > 0 ? accel_y : -accel_y);
     }
@@ -343,10 +358,13 @@ void keyboard_post_init_user(void) {
         // Valid config found, load it
         pointer_accel_x_quad = config.pointer_accel_x;
         pointer_accel_y_quad = config.pointer_accel_y;
+        scroll_accel_x_quad = config.scroll_accel_x;
+        scroll_accel_y_quad = config.scroll_accel_y;
         caret_accel_x_quad = config.caret_accel_x;
         caret_accel_y_quad = config.caret_accel_y;
         mouse_timeout_ms = config.mouse_timeout;
         base_sens_fp = config.base_sensitivity;
+        axis_snap_threshold = config.axis_snap_thresh;
     }
     // If no valid config, use defaults (already initialized)
 }
@@ -357,11 +375,14 @@ void save_config_to_eeprom(void) {
         .magic = EEPROM_MAGIC,
         .pointer_accel_x = pointer_accel_x_quad,
         .pointer_accel_y = pointer_accel_y_quad,
+        .scroll_accel_x = scroll_accel_x_quad,
+        .scroll_accel_y = scroll_accel_y_quad,
         .caret_accel_x = caret_accel_x_quad,
         .caret_accel_y = caret_accel_y_quad,
         .mouse_timeout = mouse_timeout_ms,
         .base_sensitivity = base_sens_fp,
-        .reserved = {0, 0, 0}
+        .axis_snap_thresh = axis_snap_threshold,
+        .reserved = {0}
     };
     eeprom_update_block(&config, EEPROM_CONFIG_ADDR, sizeof(eeprom_config_t));
 }
@@ -370,10 +391,13 @@ void save_config_to_eeprom(void) {
 void reset_to_defaults(void) {
     pointer_accel_x_quad = FLOAT_TO_FP(5.0);
     pointer_accel_y_quad = FLOAT_TO_FP(4.8);
+    scroll_accel_x_quad = FLOAT_TO_FP(5.0);
+    scroll_accel_y_quad = FLOAT_TO_FP(4.8);
     caret_accel_x_quad = FLOAT_TO_FP(0.25);
     caret_accel_y_quad = FLOAT_TO_FP(0.25);
     base_sens_fp = FLOAT_TO_FP(0.1);
     mouse_timeout_ms = 750;
+    axis_snap_threshold = FLOAT_TO_FP(1.3);
 }
 
 // Raw HID receive handler
@@ -382,21 +406,27 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
 
     switch (cmd) {
         case HID_CMD_GET_CONFIG: {
-            // Send current config back to host
+            // Send current config back to host (10 parameters total)
             uint8_t response[32] = {0};
             response[0] = HID_CMD_GET_CONFIG;
             response[1] = (pointer_accel_x_quad >> 8) & 0xFF;
             response[2] = pointer_accel_x_quad & 0xFF;
             response[3] = (pointer_accel_y_quad >> 8) & 0xFF;
             response[4] = pointer_accel_y_quad & 0xFF;
-            response[5] = (caret_accel_x_quad >> 8) & 0xFF;
-            response[6] = caret_accel_x_quad & 0xFF;
-            response[7] = (caret_accel_y_quad >> 8) & 0xFF;
-            response[8] = caret_accel_y_quad & 0xFF;
-            response[9] = (mouse_timeout_ms >> 8) & 0xFF;
-            response[10] = mouse_timeout_ms & 0xFF;
-            response[11] = (base_sens_fp >> 8) & 0xFF;
-            response[12] = base_sens_fp & 0xFF;
+            response[5] = (scroll_accel_x_quad >> 8) & 0xFF;
+            response[6] = scroll_accel_x_quad & 0xFF;
+            response[7] = (scroll_accel_y_quad >> 8) & 0xFF;
+            response[8] = scroll_accel_y_quad & 0xFF;
+            response[9] = (caret_accel_x_quad >> 8) & 0xFF;
+            response[10] = caret_accel_x_quad & 0xFF;
+            response[11] = (caret_accel_y_quad >> 8) & 0xFF;
+            response[12] = caret_accel_y_quad & 0xFF;
+            response[13] = (mouse_timeout_ms >> 8) & 0xFF;
+            response[14] = mouse_timeout_ms & 0xFF;
+            response[15] = (base_sens_fp >> 8) & 0xFF;
+            response[16] = base_sens_fp & 0xFF;
+            response[17] = (axis_snap_threshold >> 8) & 0xFF;
+            response[18] = axis_snap_threshold & 0xFF;
             raw_hid_send(response, length);
             break;
         }
@@ -423,6 +453,18 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
 
         case HID_CMD_SET_BASE_SENS:
             base_sens_fp = (data[1] << 8) | data[2];
+            break;
+
+        case HID_CMD_SET_SCROLL_X:
+            scroll_accel_x_quad = (data[1] << 8) | data[2];
+            break;
+
+        case HID_CMD_SET_SCROLL_Y:
+            scroll_accel_y_quad = (data[1] << 8) | data[2];
+            break;
+
+        case HID_CMD_SET_AXIS_SNAP:
+            axis_snap_threshold = (data[1] << 8) | data[2];
             break;
 
         case HID_CMD_SAVE_EEPROM:
