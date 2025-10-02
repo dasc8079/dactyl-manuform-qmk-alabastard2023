@@ -1,8 +1,46 @@
 # Dactyl-Manuform 4x6 Trackball Keyboard Firmware Project
 
 ## 🎯 Project Status: MODERN QMK INCOMPATIBLE - Using 2023 Fork
-**Last Updated**: October 1, 2025
-**Current Status**: ✅ All improvements implemented and tested!
+**Last Updated**: October 2, 2025
+**Current Status**: ✅ Baseline stable, GUI development in progress
+
+---
+
+## 📦 Current Development Status (October 2025)
+
+### Baseline Firmware (main branch)
+- **GitHub**: https://github.com/dasc8079/dactyl-manuform-qmk-alabastard2023
+- **Commit**: dad59f7 (Add README with quick start guide)
+- **Status**: ✅ Stable, tested, backed up to GitHub
+- **Purpose**: Default fallback version with manually tuned acceleration
+- **Acceleration**: Quadratic curves (Pointer X: 5.0, Y: 4.8 | Caret X/Y: 0.25)
+- **Size**: 27,280 bytes (1,392 bytes free)
+- **Features**:
+  - Mouse button timeout (750ms)
+  - Axis snapping (symmetric 1.3×)
+  - Runtime sensitivity adjustment (K+O/K+U)
+  - All 7 layers fully functional
+
+### Development Branch (feature/gui-control)
+- **Purpose**: Add WebHID GUI for runtime parameter control
+- **Status**: 🚧 In development
+- **Goals**:
+  1. ✅ Fix tap-hold timing issues for Space/Enter keys
+  2. ✅ Optimize firmware (free ~600-950 bytes)
+  3. 🚧 Implement Raw HID + acceleration curve GUI
+  4. ⏳ (Future) Add keymap reassignment if space allows
+
+### Why GUI Development?
+Manual acceleration tuning requires compile-flash-test cycles (5+ min per iteration).
+
+**GUI enables:**
+- Real-time parameter adjustment (no reflashing)
+- Visual Bezier curve editing
+- Profile save/load (localStorage + JSON export)
+- Multi-layer acceleration control
+- ~30x faster iteration vs manual compilation
+
+**Baseline preserved:** This main branch remains the stable fallback if GUI development encounters issues.
 
 ---
 
