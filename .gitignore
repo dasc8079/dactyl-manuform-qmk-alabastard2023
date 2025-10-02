@@ -29,3 +29,9 @@ keymap\ 2.c
 # Temporary files
 *.tmp
 *.bak
+
+# Old QMK installations (not needed in git)
+alabastard_backup/
+logs/
+qmk_*/
+.build/
