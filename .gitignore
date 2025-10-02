@@ -1,0 +1,31 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# QMK build artifacts
+# *.hex - INCLUDED: baseline firmware preserved
+*.bin
+*.uf2
+*.map
+*.elf
+.build/
+*.o
+*.d
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.*.swp
+
+# Backup files
+*_backup.md
+README_old_backup.md
+keymap\ 2.c
+
+# Temporary files
+*.tmp
+*.bak
