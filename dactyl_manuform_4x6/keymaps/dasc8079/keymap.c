@@ -212,6 +212,8 @@ bool get_hold_on_other_key_press(uint16_t keycode, keyrecord_t *record) {
     switch (keycode) {
         case LT(LAYER2, KC_SPC):     // Space - don't activate layer if another key pressed
         case LT(LAYER3, KC_ENT):     // Enter - don't activate layer if another key pressed
+        case LT(LAYER4, KC_K):       // K - don't activate layer if another key pressed (fixes fast typing)
+        case LT(LAYER5, KC_M):       // M - don't activate layer if another key pressed (fixes fast typing)
             return false;            // Requires key to be held without other keys
         default:
             return true;             // Default behavior for other keys

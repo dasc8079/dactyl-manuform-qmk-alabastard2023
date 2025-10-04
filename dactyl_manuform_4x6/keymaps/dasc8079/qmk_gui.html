@@ -293,6 +293,9 @@
                             <div class="legend-color" style="background: #ff6b6b;"></div>
                             <span>Y Axis</span>
                         </div>
+                        <div class="legend-item" style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #444;">
+                            <span style="font-size: 11px; color: #888;">Solid = Firmware | Dashed = Bezier</span>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -323,6 +326,9 @@
                         <div class="legend-item">
                             <div class="legend-color" style="background: #ff6b6b;"></div>
                             <span>Y Axis</span>
+                        </div>
+                        <div class="legend-item" style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #444;">
+                            <span style="font-size: 11px; color: #888;">Solid = Firmware | Dashed = Bezier</span>
                         </div>
                     </div>
                 </div>
@@ -356,6 +362,9 @@
                         <div class="legend-item">
                             <div class="legend-color" style="background: #ff6b6b;"></div>
                             <span>Y Axis</span>
+                        </div>
+                        <div class="legend-item" style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #444;">
+                            <span style="font-size: 11px; color: #888;">Solid = Firmware | Dashed = Bezier</span>
                         </div>
                     </div>
                 </div>
@@ -686,18 +695,18 @@
         function drawSingleCurve(ctx, canvas, coeff, color, mode, axis) {
             const points = bezierPoints[mode][axis];
 
-            ctx.strokeStyle = color;
+            // Draw Bezier curve (dashed - user input)
+            ctx.strokeStyle = color + '80'; // Semi-transparent
             ctx.lineWidth = 2;
+            ctx.setLineDash([5, 3]);
             ctx.beginPath();
 
             for (let t = 0; t <= 1; t += 0.01) {
                 const x = cubicBezier(t, 0, points.p1[0], points.p2[0], 1);
-                const input = x * 10;
-                const output = input * input * coeff;
+                const y = cubicBezier(t, 0, points.p1[1], points.p2[1], 1);
 
                 const canvasX = x * canvas.width;
-                const maxOutput = 10 * 10 * Math.max(coeff, 0.1);
-                const canvasY = canvas.height - (output / maxOutput) * canvas.height;
+                const canvasY = canvas.height - y * canvas.height;
 
                 if (t === 0) {
                     ctx.moveTo(canvasX, canvasY);
@@ -706,11 +715,32 @@
                 }
             }
             ctx.stroke();
+            ctx.setLineDash([]);
 
-            // Draw Bezier control lines (dashed)
-            ctx.strokeStyle = color + '40';
+            // Draw Quadratic curve (solid - actual firmware behavior)
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+
+            for (let x = 0; x <= 10; x += 0.1) {
+                const output = x * x * coeff;
+
+                const canvasX = (x / 10) * canvas.width;
+                const maxOutput = 10 * 10 * Math.max(coeff, 0.1);
+                const canvasY = canvas.height - (output / maxOutput) * canvas.height;
+
+                if (x === 0) {
+                    ctx.moveTo(canvasX, canvasY);
+                } else {
+                    ctx.lineTo(canvasX, canvasY);
+                }
+            }
+            ctx.stroke();
+
+            // Draw Bezier control lines (very faint dashed)
+            ctx.strokeStyle = color + '30';
             ctx.lineWidth = 1;
-            ctx.setLineDash([5, 5]);
+            ctx.setLineDash([3, 3]);
             ctx.beginPath();
             ctx.moveTo(0, canvas.height);
             ctx.lineTo(points.p1[0] * canvas.width, canvas.height - points.p1[1] * canvas.height);
@@ -770,6 +800,34 @@
             document.addEventListener('mouseup', stopDrag);
         }
 
+        // Fit quadratic coefficient from Bezier curve
+        function fitQuadraticFromBezier(p1, p2) {
+            // Sample the Bezier curve at multiple points
+            const samples = [];
+            for (let t = 0; t <= 1; t += 0.1) {
+                const x = cubicBezier(t, 0, p1[0], p2[0], 1);
+                const y = cubicBezier(t, 0, p1[1], p2[1], 1);
+                // Convert to input/output space (0-10 range)
+                samples.push({ input: x * 10, output: y * 100 }); // y * 100 because max output ~100 at coeff 5.0
+            }
+
+            // Fit y = ax² using least squares
+            // Minimize: Σ(y - ax²)²
+            // Derivative: Σ 2(y - ax²)(-x²) = 0
+            // Solving: a = Σ(xy²) / Σ(x⁴)
+            let sumXY = 0;
+            let sumX4 = 0;
+
+            for (const sample of samples) {
+                const x2 = sample.input * sample.input;
+                sumXY += sample.output * x2;
+                sumX4 += x2 * x2;
+            }
+
+            const coeff = sumX4 > 0 ? sumXY / sumX4 : 0;
+            return Math.max(0.01, Math.min(8.0, coeff)); // Clamp to reasonable range
+        }
+
         function onDrag(e) {
             if (!draggingHandle) return;
 
@@ -788,6 +846,19 @@
 
             bezierPoints[mode][axis][point] = [x, y];
 
+            // Calculate best-fit quadratic coefficient from Bezier curve
+            const p1 = bezierPoints[mode][axis].p1;
+            const p2 = bezierPoints[mode][axis].p2;
+            const quadCoeff = fitQuadraticFromBezier(p1, p2);
+
+            // Update the slider to match the Bezier curve
+            const sliderId = mode + axis.toUpperCase() + 'Quad';
+            const slider = document.getElementById(sliderId);
+            if (slider) {
+                slider.value = floatToFp(quadCoeff);
+                updateValue(sliderId);
+            }
+
             const canvasId = mode + 'Curve';
             const coeffXId = mode + 'XQuad';
             const coeffYId = mode + 'YQuad';
@@ -801,10 +872,31 @@
             document.removeEventListener('mouseup', stopDrag);
         }
 
+        // Sync Bezier points from slider value (reverse direction)
+        function syncBezierFromSlider(mode, axis, coeff) {
+            // Create a simple Bezier curve that approximates y = x² × coeff
+            // Use a symmetric curve with control points that create quadratic-like shape
+            const normalized = coeff / 5.0; // Normalize around typical value of 5.0
+            const p1y = Math.min(0.4 * normalized, 0.9);
+            const p2y = Math.min(0.8 * normalized, 0.95);
+
+            bezierPoints[mode][axis].p1 = [0.33, p1y];
+            bezierPoints[mode][axis].p2 = [0.67, p2y];
+        }
+
         // Event listeners
         ['pointerXQuad', 'pointerYQuad', 'scrollXQuad', 'scrollYQuad', 'caretXQuad', 'caretYQuad', 'baseSens', 'mouseTimeout', 'axisSnap'].forEach(id => {
             document.getElementById(id).addEventListener('input', () => {
                 updateValue(id);
+
+                // Sync Bezier points when slider moves
+                if (id.includes('Quad')) {
+                    const mode = id.includes('pointer') ? 'pointer' : id.includes('scroll') ? 'scroll' : 'caret';
+                    const axis = id.includes('X') ? 'x' : 'y';
+                    const coeff = fpToFloat(parseInt(document.getElementById(id).value));
+                    syncBezierFromSlider(mode, axis, coeff);
+                }
+
                 if (id.includes('pointer')) {
                     drawCurve('pointerCurve', 'pointerXQuad', 'pointerYQuad', 'pointer');
                 } else if (id.includes('scroll')) {
